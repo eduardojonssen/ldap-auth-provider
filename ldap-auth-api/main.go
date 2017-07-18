@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/eduardojonssen/ldap-auth-provider/configuration"
+	"github.com/eduardojonssen/ldap-auth-provider/repository"
 	"github.com/gorilla/mux"
 )
 
@@ -36,8 +39,6 @@ type tokenEndpointResponse struct {
 
 func authorizeEndpoint(w http.ResponseWriter, r *http.Request) {
 
-	// TODO: Check repository connection.
-
 	vals := r.URL.Query()
 
 	responseType, success := vals["response_type"]
@@ -61,7 +62,17 @@ func authorizeEndpoint(w http.ResponseWriter, r *http.Request) {
 	redirectURI, success := vals["redirect_uri"]
 	state, success := vals["state"]
 
-	// TODO: Validate the clientID.
+	// Validate the clientID.
+	isValidClientID, err := repository.ValidateClientID(clientID[0])
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if isValidClientID == false {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	// TODO: Load the redirectURI, if not specified.
 
 	// TODO: Create an authorization code.
@@ -79,8 +90,6 @@ func authorizeEndpoint(w http.ResponseWriter, r *http.Request) {
 
 func tokenEndpoint(w http.ResponseWriter, r *http.Request) {
 
-	// TODO: Check repository connection.
-
 	decoder := json.NewDecoder(r.Body)
 	var request tokenEndpointRequest
 	err := decoder.Decode(&request)
@@ -90,8 +99,6 @@ func tokenEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println(request)
-
 	defer r.Body.Close()
 
 	// Validates the grant type.
@@ -100,31 +107,67 @@ func tokenEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Read client credentials from Authorization header.
+	// Get and split the authorization header.
+	authorizationHeader := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
 
-	// Validates the client id.
-	if request.ClientID == "" {
-		w.WriteHeader(http.StatusBadRequest)
+	if len(authorizationHeader) == 2 && strings.ToLower(authorizationHeader[0]) == "basic" {
+
+		// Decode the base64 credentials string.
+		credentialsString, err := base64.StdEncoding.DecodeString(authorizationHeader[1])
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		// Splits the clientId and clientSecret.
+		credentials := strings.SplitN(string(credentialsString), ":", 2)
+		if len(credentials) != 2 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		request.ClientID = credentials[0]
+		request.ClientSecret = credentials[1]
+
+	} else {
+
+		// Validates the client id from body.
+		if request.ClientID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Validates the client secret from body.
+		if request.ClientSecret == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Validate the client credentials.
+	isValidClientID, err := repository.ValidateClientCredentials(request.ClientID, request.ClientSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if isValidClientID == false {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
-	// Validates the client secret.
-	if request.ClientSecret == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+	log.Println(request)
 
 	var response *tokenEndpointResponse
 
 	switch request.GrantType {
 	case "authorization_code":
-		response, err = grantAuthorizationCode(&request)
+		response, err = grantAuthorizationCode(w, &request)
 	case "password":
-		response, err = grantResourceOwner(&request)
+		response, err = grantResourceOwner(w, &request)
 	case "client_credentials":
-		response, err = grantClientCredentials(&request)
+		response, err = grantClientCredentials(w, &request)
 	case "refresh_token":
-		response, err = grantRefreshToken(&request)
+		response, err = grantRefreshToken(w, &request)
 	}
 
 	json, err := json.Marshal(response)
@@ -151,9 +194,9 @@ func grantImplicit() error {
 	return nil
 }
 
-func grantAuthorizationCode(request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
+func grantAuthorizationCode(w http.ResponseWriter, request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
 
-	log.Println("authorization token requested:", request)
+	log.Println("authorization token requested")
 
 	var response = new(tokenEndpointResponse)
 
@@ -165,21 +208,35 @@ func grantAuthorizationCode(request *tokenEndpointRequest) (*tokenEndpointRespon
 	return response, nil
 }
 
-func grantResourceOwner(request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
+func grantResourceOwner(w http.ResponseWriter, request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
 
 	log.Println("resource owner token requested")
+
+	// Checks if the username was provided.
+	if request.Username == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return nil, nil
+	}
+
+	// Checks if the password was provided.
+	if request.Password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return nil, nil
+	}
+
+	// TODO: to validate user credentials in database.
 
 	return nil, nil
 }
 
-func grantClientCredentials(request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
+func grantClientCredentials(w http.ResponseWriter, request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
 
 	log.Println("client credentials token requested")
 
 	return nil, nil
 }
 
-func grantRefreshToken(request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
+func grantRefreshToken(w http.ResponseWriter, request *tokenEndpointRequest) (*tokenEndpointResponse, error) {
 
 	log.Println("refresh token requested")
 
